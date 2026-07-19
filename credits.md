@@ -20,3 +20,11 @@ https://freesound.org/people/blueshrimp1235/sounds/797804/
 ## made by ggbot:
 
 https://ggbot.itch.io/home-video-font
+
+## made by EpicAllay:
+
+https://freesound.org/people/EpicAllay/sounds/615085/
+
+## made by lbrady240:
+
+https://freesound.org/people/lbrady240/sounds/850097/

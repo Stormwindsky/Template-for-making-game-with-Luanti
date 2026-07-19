@@ -60,37 +60,119 @@ minetest.register_node("core:grass", {
 minetest.register_alias("mapgen_stone", "core:stone")
 
 -- =======================================================================
--- 3. LE MOTEUR AUDIO DYNAMIQUE (PAS, MINAGE, PLACEMENT, DÉGÂTS)
+-- 3. LE MOTEUR AUDIO, CONFIGURATION DU SPRINT ET CONTRÔLE DE VOL ULTIME
 -- =======================================================================
 
+-- Configuration du Sprint au sol
+local SPRINT_SPEED = 1.6
+local NORMAL_SPEED = 1.0
+local DOUBLE_TAP_TIME = 0.3
+
+-- Tables d'états pour le sprint
 local player_timers = {}
+local players_is_sprinting = {}
+local last_keys = {}
+local sprint_window_timers = {}
 
 minetest.register_globalstep(function(dtime)
     for _, player in ipairs(minetest.get_connected_players()) do
         local name = player:get_player_name()
+        local privs = minetest.get_player_privs(name)
+        local controls = player:get_player_control()
         
+        -- Initialisation des tables d'états
         if not player_timers[name] then
             player_timers[name] = { step = 0, dig = 0 }
         end
+        if not players_is_sprinting[name] then players_is_sprinting[name] = false end
+        if not sprint_window_timers[name] then sprint_window_timers[name] = 0 end
+        if not last_keys[name] then last_keys[name] = false end
         
         local timers = player_timers[name]
-        local controls = player:get_player_control()
+        local physics = player:get_physics_override()
         
-        -- Trouver le bloc sous les pieds du joueur
+        -- -------------------------------------------------------------------
+        -- SÉCURITÉ DU VOL & CONFIGURATION DES PRIVILÈGES FAST
+        -- -------------------------------------------------------------------
+        if minetest.settings:get_bool("creative_mode") or privs.creative then
+            -- MODE CRÉATIF : Donne fly + fast (indispensable pour la vitesse en vol)
+            if not privs.fly or not privs.fast then
+                privs.fly = true
+                privs.fast = true
+                minetest.set_player_privs(name, privs)
+            end
+            if physics.fly == false then
+                physics.fly = true
+            end
+            
+            -- PLAN B : On booste la vitesse du mode "fast" en vol à 5.0 (comme Minecraft)
+            physics.speed_fast = 5.0
+        else
+            -- MODE SURVIE : On retire tout immédiatement
+            if privs.fly or privs.fast then
+                privs.fly = nil
+                privs.fast = nil
+                minetest.set_player_privs(name, privs)
+            end
+            physics.fly = false
+            physics.speed_fast = 1.0
+        end
+
+        -- -------------------------------------------------------------------
+        -- SYSTÈME DE SPRINT INTÉGRÉ AU SOL (DOUBLE TAP)
+        -- -------------------------------------------------------------------
+        if controls.up and not last_keys[name] then
+            if sprint_window_timers[name] > 0 and sprint_window_timers[name] < DOUBLE_TAP_TIME then
+                players_is_sprinting[name] = true
+            end
+            sprint_window_timers[name] = DOUBLE_TAP_TIME
+        end
+
+        if players_is_sprinting[name] then
+            if not controls.up or controls.sneak then
+                players_is_sprinting[name] = false
+            end
+        end
+
+        -- Application de la vitesse de marche/sprint au sol
+        local target_speed = NORMAL_SPEED
+        if players_is_sprinting[name] then
+            target_speed = SPRINT_SPEED
+        end
+
+        -- Si on appuie sur la touche spéciale de course (aux1) ou si on sprinte en l'air,
+        -- Luanti utilise automatiquement la valeur de physics.speed_fast (qui est à 5.0 !)
+        if physics.speed ~= target_speed then
+            physics.speed = target_speed
+        end
+        
+        -- Sauvegarde des changements physiques globaux d'un seul coup
+        player:set_physics_override(physics)
+
+        if sprint_window_timers[name] > 0 then
+            sprint_window_timers[name] = sprint_window_timers[name] - dtime
+        end
+        last_keys[name] = controls.up
+
+        -- -------------------------------------------------------------------
+        -- A. GESTION DES BRUITS DE PAS (MARCHER / SPRINT)
+        -- -------------------------------------------------------------------
         local pos = player:get_pos()
         local pos_under = {x = pos.x, y = pos.y - 0.5, z = pos.z}
         local node_under = minetest.get_node(pos_under)
         local config_under = get_json_config(node_under.name)
         
-        -- A. GESTION DES BRUITS DE PAS (MARCHER)
         if config_under and config_under.footstep then
             local velocity = player:get_velocity()
+            -- On ne joue pas de son si le joueur vole (vitesse y non nulle sans toucher de bloc)
             local is_moving = (velocity.x ~= 0 or velocity.z ~= 0) and (velocity.y == 0)
             
             if is_moving then
                 timers.step = timers.step + dtime
-                if timers.step >= 0.35 then
-                    local step_pitch = 0.5 + (math.random() * 1.0) -- Pitch de 0.5 à 1.5
+                local step_cooldown = players_is_sprinting[name] and 0.22 or 0.35
+                
+                if timers.step >= step_cooldown then
+                    local step_pitch = 0.5 + (math.random() * 1.0)
                     minetest.sound_play(config_under.footstep, {
                         object = player,
                         gain = config_under.gain or 0.5,
@@ -104,7 +186,9 @@ minetest.register_globalstep(function(dtime)
             end
         end
         
-        -- B. GESTION DU CLIC GAUCHE ENFONCÉ (MINAGE -> UTILISE LE SON DE PAS)
+        -- -------------------------------------------------------------------
+        -- B. GESTION DU CLIC GAUCHE ENFONCÉ (MINAGE)
+        -- -------------------------------------------------------------------
         if controls.LMB then
             local p_eye = player:get_pos()
             p_eye.y = p_eye.y + player:get_properties().eye_height
@@ -121,11 +205,10 @@ minetest.register_globalstep(function(dtime)
                 local node_pointed = minetest.get_node(pointed.under)
                 local config_pointed = get_json_config(node_pointed.name)
                 
-                -- MODIFICATION : Force l'utilisation de config_pointed.footstep pour miner
                 if config_pointed and config_pointed.footstep then
                     timers.dig = timers.dig + dtime
                     if timers.dig >= 0.18 then
-                        local dig_pitch = 1.0 + (math.random() * 0.5) -- Pitch de 1.0 à 1.5
+                        local dig_pitch = 1.0 + (math.random() * 0.5)
                         minetest.sound_play(config_pointed.footstep, {
                             pos = pointed.under,
                             gain = (config_pointed.gain or 0.5) + 0.1,
@@ -142,25 +225,26 @@ minetest.register_globalstep(function(dtime)
     end
 end)
 
--- C. GESTION DU CLIC DROIT (PLACEMENT -> UTILISE AUSSI LE SON DE PAS)
+-- =======================================================================
+-- C. GESTION DU CLIC DROIT (PLACEMENT)
+-- =======================================================================
 minetest.register_on_placenode(function(pos, newnode, placer, oldnode, itemstack, pointed_thing)
     if not placer or not placer:is_player() then return end
     
     local config = get_json_config(newnode.name)
-    
-    -- MODIFICATION : Force l'utilisation de config.footstep pour placer le bloc
     if config and config.footstep then
-        local place_pitch = 1.0 + (math.random() * 0.5) -- Pitch de 1.0 à 1.5
+        local place_pitch = 1.0 + (math.random() * 0.5)
         minetest.sound_play(config.footstep, {
             pos = pos,
             gain = config.gain or 0.5,
             pitch = place_pitch,
-            max_hear_distance = 12,
         })
     end
 end)
 
+-- =======================================================================
 -- D. BRUITAGE DES DÉGÂTS
+-- =======================================================================
 minetest.register_on_player_hpchange(function(player, hp_change, reason)
     if hp_change < 0 then
         local damage_pitch = 0.5 + (math.random() * 1.0)
@@ -229,7 +313,8 @@ end)
 minetest.register_on_newplayer(function(player)
     player:set_pos({x = 0, y = 30, z = 0})
     local privs = minetest.get_player_privs(player:get_player_name())
-    privs.fly = true
     privs.interact = true
     minetest.set_player_privs(player:get_player_name(), privs)
 end)
+
+minetest.log("action", "[Mod] Core Engine with Sound & Fast Fly Plan B Loaded")
