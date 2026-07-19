@@ -1,0 +1,235 @@
+-- =======================================================================
+-- 1. CHARGEMENT DE LA CONFIGURATION DES SONS (JSON)
+-- =======================================================================
+
+local modpath = minetest.get_modpath(minetest.get_current_modname())
+
+local file = io.open(modpath .. "/sounds.json", "r")
+local json_data = "{}" 
+if file then
+    json_data = file:read("*all")
+    file:close()
+end
+
+local block_sounds = minetest.parse_json(json_data) or {}
+
+-- Fonction utilitaire pour récupérer les configs du JSON
+local function get_json_config(node_name)
+    return block_sounds[node_name]
+end
+
+-- =======================================================================
+-- 2. ENREGISTREMENT DES BLOCS ET DE LA MAIN (SANS AUCUN SON PAR DÉFAUT)
+-- =======================================================================
+
+minetest.register_item(":", {
+    type = "none",
+    wield_image = "hand.png",
+    tool_capabilities = {
+        full_punch_interval = 0.9,
+        max_drop_level = 0,
+        groupcaps = {
+            crumbly = {times={[2]=0.80, [3]=0.40}, uses=0, maxlevel=1},
+            cracky = {times={[3]=1.50}, uses=0, maxlevel=1},
+        },
+        damage_groups = {fleshy=1},
+    },
+})
+
+minetest.register_node("core:stone", {
+    description = "Pierre de base",
+    tiles = {"stone.png"},
+    groups = {cracky = 3},
+    sounds = {},
+})
+
+minetest.register_node("core:dirt", {
+    description = "Terre de base",
+    tiles = {"dirt.png"},
+    groups = {crumbly = 3, soil = 1},
+    sounds = {},
+})
+
+minetest.register_node("core:grass", {
+    description = "Bloc d'herbe",
+    tiles = {"grass.png", "dirt.png", "dirt.png^grass_side.png"},
+    groups = {crumbly = 3, soil = 1},
+    sounds = {},
+})
+
+minetest.register_alias("mapgen_stone", "core:stone")
+
+-- =======================================================================
+-- 3. LE MOTEUR AUDIO DYNAMIQUE (PAS, MINAGE, PLACEMENT, DÉGÂTS)
+-- =======================================================================
+
+local player_timers = {}
+
+minetest.register_globalstep(function(dtime)
+    for _, player in ipairs(minetest.get_connected_players()) do
+        local name = player:get_player_name()
+        
+        if not player_timers[name] then
+            player_timers[name] = { step = 0, dig = 0 }
+        end
+        
+        local timers = player_timers[name]
+        local controls = player:get_player_control()
+        
+        -- Trouver le bloc sous les pieds du joueur
+        local pos = player:get_pos()
+        local pos_under = {x = pos.x, y = pos.y - 0.5, z = pos.z}
+        local node_under = minetest.get_node(pos_under)
+        local config_under = get_json_config(node_under.name)
+        
+        -- A. GESTION DES BRUITS DE PAS (MARCHER)
+        if config_under and config_under.footstep then
+            local velocity = player:get_velocity()
+            local is_moving = (velocity.x ~= 0 or velocity.z ~= 0) and (velocity.y == 0)
+            
+            if is_moving then
+                timers.step = timers.step + dtime
+                if timers.step >= 0.35 then
+                    local step_pitch = 0.5 + (math.random() * 1.0) -- Pitch de 0.5 à 1.5
+                    minetest.sound_play(config_under.footstep, {
+                        object = player,
+                        gain = config_under.gain or 0.5,
+                        pitch = step_pitch,
+                        max_hear_distance = 10,
+                    })
+                    timers.step = 0
+                end
+            else
+                timers.step = 0
+            end
+        end
+        
+        -- B. GESTION DU CLIC GAUCHE ENFONCÉ (MINAGE -> UTILISE LE SON DE PAS)
+        if controls.LMB then
+            local p_eye = player:get_pos()
+            p_eye.y = p_eye.y + player:get_properties().eye_height
+            local look_dir = player:get_look_dir()
+            local p_target = {
+                x = p_eye.x + look_dir.x * 4,
+                y = p_eye.y + look_dir.y * 4,
+                z = p_eye.z + look_dir.z * 4
+            }
+            local ray = minetest.raycast(p_eye, p_target, false, false)
+            local pointed = ray:next()
+            
+            if pointed and pointed.type == "node" then
+                local node_pointed = minetest.get_node(pointed.under)
+                local config_pointed = get_json_config(node_pointed.name)
+                
+                -- MODIFICATION : Force l'utilisation de config_pointed.footstep pour miner
+                if config_pointed and config_pointed.footstep then
+                    timers.dig = timers.dig + dtime
+                    if timers.dig >= 0.18 then
+                        local dig_pitch = 1.0 + (math.random() * 0.5) -- Pitch de 1.0 à 1.5
+                        minetest.sound_play(config_pointed.footstep, {
+                            pos = pointed.under,
+                            gain = (config_pointed.gain or 0.5) + 0.1,
+                            pitch = dig_pitch,
+                            max_hear_distance = 12,
+                        })
+                        timers.dig = 0
+                    end
+                end
+            end
+        else
+            timers.dig = 0
+        end
+    end
+end)
+
+-- C. GESTION DU CLIC DROIT (PLACEMENT -> UTILISE AUSSI LE SON DE PAS)
+minetest.register_on_placenode(function(pos, newnode, placer, oldnode, itemstack, pointed_thing)
+    if not placer or not placer:is_player() then return end
+    
+    local config = get_json_config(newnode.name)
+    
+    -- MODIFICATION : Force l'utilisation de config.footstep pour placer le bloc
+    if config and config.footstep then
+        local place_pitch = 1.0 + (math.random() * 0.5) -- Pitch de 1.0 à 1.5
+        minetest.sound_play(config.footstep, {
+            pos = pos,
+            gain = config.gain or 0.5,
+            pitch = place_pitch,
+            max_hear_distance = 12,
+        })
+    end
+end)
+
+-- D. BRUITAGE DES DÉGÂTS
+minetest.register_on_player_hpchange(function(player, hp_change, reason)
+    if hp_change < 0 then
+        local damage_pitch = 0.5 + (math.random() * 1.0)
+        minetest.sound_play("core_damage", {
+            object = player,
+            gain = 0.8,
+            max_hear_distance = 10,
+            pitch = damage_pitch,
+        })
+    end
+    return hp_change
+end, true)
+
+-- =======================================================================
+-- 4. GÉNÉRATEUR DE MAP & SPAWN
+-- =======================================================================
+
+local noise_params = {
+    offset = 10,
+    scale = 15,
+    spread = {x = 150, y = 150, z = 150},
+    seed = 538,
+    octaves = 3,
+    persist = 0.5
+}
+
+minetest.register_on_generated(function(minp, maxp, blockseed)
+    local c_grass = minetest.get_content_id("core:grass")
+    local c_dirt  = minetest.get_content_id("core:dirt")
+    local c_stone = minetest.get_content_id("core:stone")
+    local c_air   = minetest.CONTENT_AIR
+
+    local vm, emin, emax = minetest.get_mapgen_object("voxelmanip")
+    local area = VoxelArea:new({MinEdge = emin, MaxEdge = emax})
+    local data = vm:get_data()
+
+    local perlin = minetest.get_perlin(noise_params)
+
+    for z = minp.z, maxp.z do
+        for x = minp.x, maxp.x do
+            local ground_level = math.floor(perlin:get_2d({x = x, y = z}))
+
+            for y = minp.y, maxp.y do
+                local vi = area:index(x, y, z)
+
+                if y <= ground_level then
+                    if y == ground_level then
+                        data[vi] = c_grass
+                    elseif y > ground_level - 4 then
+                        data[vi] = c_dirt
+                    else
+                        data[vi] = c_stone
+                    end
+                else
+                    data[vi] = c_air
+                end
+            end
+        end
+    end
+
+    vm:set_data(data)
+    vm:calc_lighting()
+    vm:write_to_map()
+end)
+
+minetest.register_on_newplayer(function(player)
+    player:set_pos({x = 0, y = 30, z = 0})
+    local privs = minetest.get_player_privs(player:get_player_name())
+    privs.fly = true
+    privs.interact = true
+    minetest.set_player_privs(player:get_player_name(), privs)
+end)
