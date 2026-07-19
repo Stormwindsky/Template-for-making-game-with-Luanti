@@ -68,11 +68,12 @@ local SPRINT_SPEED = 1.6
 local NORMAL_SPEED = 1.0
 local DOUBLE_TAP_TIME = 0.3
 
--- Tables d'états pour le sprint
+-- Tables d'états pour le sprint et le minage temporisé
 local player_timers = {}
 local players_is_sprinting = {}
 local last_keys = {}
 local sprint_window_timers = {}
+local creative_dig_timers = {}
 
 minetest.register_globalstep(function(dtime)
     for _, player in ipairs(minetest.get_connected_players()) do
@@ -87,15 +88,17 @@ minetest.register_globalstep(function(dtime)
         if not players_is_sprinting[name] then players_is_sprinting[name] = false end
         if not sprint_window_timers[name] then sprint_window_timers[name] = 0 end
         if not last_keys[name] then last_keys[name] = false end
+        if not creative_dig_timers[name] then creative_dig_timers[name] = { pos = nil, time = 0 } end
         
         local timers = player_timers[name]
         local physics = player:get_physics_override()
         
+        local is_creative = minetest.settings:get_bool("creative_mode") or privs.creative
+
         -- -------------------------------------------------------------------
         -- SÉCURITÉ DU VOL & CONFIGURATION DES PRIVILÈGES FAST
         -- -------------------------------------------------------------------
-        if minetest.settings:get_bool("creative_mode") or privs.creative then
-            -- MODE CRÉATIF : Donne fly + fast (indispensable pour la vitesse en vol)
+        if is_creative then
             if not privs.fly or not privs.fast then
                 privs.fly = true
                 privs.fast = true
@@ -104,11 +107,8 @@ minetest.register_globalstep(function(dtime)
             if physics.fly == false then
                 physics.fly = true
             end
-            
-            -- PLAN B : On booste la vitesse du mode "fast" en vol à 5.0 (comme Minecraft)
             physics.speed_fast = 5.0
         else
-            -- MODE SURVIE : On retire tout immédiatement
             if privs.fly or privs.fast then
                 privs.fly = nil
                 privs.fast = nil
@@ -134,19 +134,15 @@ minetest.register_globalstep(function(dtime)
             end
         end
 
-        -- Application de la vitesse de marche/sprint au sol
         local target_speed = NORMAL_SPEED
         if players_is_sprinting[name] then
             target_speed = SPRINT_SPEED
         end
 
-        -- Si on appuie sur la touche spéciale de course (aux1) ou si on sprinte en l'air,
-        -- Luanti utilise automatiquement la valeur de physics.speed_fast (qui est à 5.0 !)
         if physics.speed ~= target_speed then
             physics.speed = target_speed
         end
         
-        -- Sauvegarde des changements physiques globaux d'un seul coup
         player:set_physics_override(physics)
 
         if sprint_window_timers[name] > 0 then
@@ -164,7 +160,6 @@ minetest.register_globalstep(function(dtime)
         
         if config_under and config_under.footstep then
             local velocity = player:get_velocity()
-            -- On ne joue pas de son si le joueur vole (vitesse y non nulle sans toucher de bloc)
             local is_moving = (velocity.x ~= 0 or velocity.z ~= 0) and (velocity.y == 0)
             
             if is_moving then
@@ -187,7 +182,7 @@ minetest.register_globalstep(function(dtime)
         end
         
         -- -------------------------------------------------------------------
-        -- B. GESTION DU CLIC GAUCHE ENFONCÉ (MINAGE)
+        -- B. GESTION DU CLIC GAUCHE ENFONCÉ (MINAGE AVEC SÉCURITÉ CRÉATIF 1S)
         -- -------------------------------------------------------------------
         if controls.LMB then
             local p_eye = player:get_pos()
@@ -205,6 +200,7 @@ minetest.register_globalstep(function(dtime)
                 local node_pointed = minetest.get_node(pointed.under)
                 local config_pointed = get_json_config(node_pointed.name)
                 
+                -- Bruits de minage
                 if config_pointed and config_pointed.footstep then
                     timers.dig = timers.dig + dtime
                     if timers.dig >= 0.18 then
@@ -218,9 +214,31 @@ minetest.register_globalstep(function(dtime)
                         timers.dig = 0
                     end
                 end
+
+                -- Système de destruction forcée en Créatif
+                if is_creative and node_pointed.name ~= "air" then
+                    local p_state = creative_dig_timers[name]
+                    
+                    if not p_state.pos or p_state.pos.x ~= pointed.under.x or p_state.pos.y ~= pointed.under.y or p_state.pos.z ~= pointed.under.z then
+                        p_state.pos = pointed.under
+                        p_state.time = 0
+                    else
+                        p_state.time = p_state.time + dtime
+                        if p_state.time >= 0.3 then
+                            minetest.node_dig(pointed.under, node_pointed, player)
+                            p_state.pos = nil
+                            p_state.time = 0
+                        end
+                    end
+                end
+            else
+                creative_dig_timers[name].pos = nil
             end
         else
             timers.dig = 0
+            if creative_dig_timers[name] then
+                creative_dig_timers[name].pos = nil
+            end
         end
     end
 end)
@@ -259,8 +277,14 @@ minetest.register_on_player_hpchange(function(player, hp_change, reason)
 end, true)
 
 -- =======================================================================
--- 4. GÉNÉRATEUR DE MAP & SPAWN
+-- 4. CONFIGURATION ET SYSTÈMES MULTI-MAPGENS (STANDARD, FLAT, SKYBLOCK)
 -- =======================================================================
+
+-- Force Luanti à utiliser le mode singlenode en arrière-plan pour éviter les conflits de générateurs natifs
+minetest.set_mapgen_setting("mg_name", "singlenode", true)
+
+-- Récupération de l'option de monde ("standard", "flat", ou "skyblock")
+local mapgen_type = minetest.settings:get("core_mapgen_type") or "standard"
 
 local noise_params = {
     offset = 10,
@@ -281,25 +305,75 @@ minetest.register_on_generated(function(minp, maxp, blockseed)
     local area = VoxelArea:new({MinEdge = emin, MaxEdge = emax})
     local data = vm:get_data()
 
-    local perlin = minetest.get_perlin(noise_params)
+    -- A. LOGIQUE S'IL S'AGIT D'UN SKYBLOCK
+    if mapgen_type == "skyblock" then
+        for i = 1, #data do
+            data[i] = c_air
+        end
 
-    for z = minp.z, maxp.z do
-        for x = minp.x, maxp.x do
-            local ground_level = math.floor(perlin:get_2d({x = x, y = z}))
+        if minp.x <= 0 and maxp.x >= 0 and minp.z <= 0 and maxp.z >= 0 and minp.y <= 30 and maxp.y >= 30 then
+            for z = -2, 2 do
+                for x = -2, 2 do
+                    local vi_grass = area:index(x, 30, z)
+                    data[vi_grass] = c_grass
 
-            for y = minp.y, maxp.y do
-                local vi = area:index(x, y, z)
-
-                if y <= ground_level then
-                    if y == ground_level then
-                        data[vi] = c_grass
-                    elseif y > ground_level - 4 then
-                        data[vi] = c_dirt
-                    else
-                        data[vi] = c_stone
+                    for y = 28, 29 do
+                        local vi_dirt = area:index(x, y, z)
+                        data[vi_dirt] = c_dirt
                     end
-                else
-                    data[vi] = c_air
+
+                    local vi_stone = area:index(x, 27, z)
+                    data[vi_stone] = c_stone
+                end
+            end
+        end
+
+    -- B. LOGIQUE S'IL S'AGIT D'UN FLATWORLD
+    elseif mapgen_type == "flat" then
+        local flat_level = 10
+
+        for z = minp.z, maxp.z do
+            for x = minp.x, maxp.x do
+                for y = minp.y, maxp.y do
+                    local vi = area:index(x, y, z)
+
+                    if y <= flat_level then
+                        if y == flat_level then
+                            data[vi] = c_grass
+                        elseif y > flat_level - 4 then
+                            data[vi] = c_dirt
+                        else
+                            data[vi] = c_stone
+                        end
+                    else
+                        data[vi] = c_air
+                    end
+                end
+            end
+        end
+
+    -- C. LOGIQUE STANDARD DE TERRAIN (RELIEFS PERLIN NOISE)
+    else
+        local perlin = minetest.get_perlin(noise_params)
+
+        for z = minp.z, maxp.z do
+            for x = minp.x, maxp.x do
+                local ground_level = math.floor(perlin:get_2d({x = x, y = z}))
+
+                for y = minp.y, maxp.y do
+                    local vi = area:index(x, y, z)
+
+                    if y <= ground_level then
+                        if y == ground_level then
+                            data[vi] = c_grass
+                        elseif y > ground_level - 4 then
+                            data[vi] = c_dirt
+                        else
+                            data[vi] = c_stone
+                        end
+                    else
+                        data[vi] = c_air
+                    end
                 end
             end
         end
@@ -311,10 +385,14 @@ minetest.register_on_generated(function(minp, maxp, blockseed)
 end)
 
 minetest.register_on_newplayer(function(player)
-    player:set_pos({x = 0, y = 30, z = 0})
+    if mapgen_type == "skyblock" then
+        player:set_pos({x = 0, y = 32, z = 0})
+    else
+        player:set_pos({x = 0, y = 30, z = 0})
+    end
     local privs = minetest.get_player_privs(player:get_player_name())
     privs.interact = true
     minetest.set_player_privs(player:get_player_name(), privs)
 end)
 
-minetest.log("action", "[Mod] Core Engine with Sound & Fast Fly Plan B Loaded")
+minetest.log("action", "[Mod] Core Engine with Multi-Mapgen Options Loaded")
