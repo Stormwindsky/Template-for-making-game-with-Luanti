@@ -1,0 +1,20 @@
+{
+  "core:grass": {
+    "footstep": "core_grass_footstep",
+    "dug": "core_grass_dug",
+    "place": "core_grass_place",
+    "gain": 100
+  },
+  "core:dirt": {
+    "footstep": "core_dirt_footstep",
+    "dug": "core_dirt_dug",
+    "place": "core_dirt_place",
+    "gain": 100
+  },
+  "core:stone": {
+    "footstep": "core_stone_footstep",
+    "dug": "core_stone_dug",
+    "place": "core_stone_place",
+    "gain": 100
+  }
+}
