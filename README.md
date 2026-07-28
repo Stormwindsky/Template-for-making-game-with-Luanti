@@ -16,3 +16,5 @@ https://github.com/Stormwindsky/Template-for-making-game-with-Luanti/tree/main/s
 https://github.com/Stormwindsky/Template-for-making-game-with-Luanti/tree/main/menu
 
 ### ARE LICENSED UNDER CC0 1.0 AND THEREFORE ARE NOT LICENSED UNDER MIT-0
+
+### THEREFORE, ALL ASSETS ARE LICENSED UNDER THE CC0 1.0 LICENSE, AND THE SCRIPTS ARE LICENSED UNDER THE MIT-0 LICENSE
