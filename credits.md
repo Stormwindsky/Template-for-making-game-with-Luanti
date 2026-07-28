@@ -1,4 +1,4 @@
-# CC0 1.0 assets used for this Tempalte:
+# CC0 1.0 assets used for this Template:
 
 
 ## Unknown user bc yeah:
